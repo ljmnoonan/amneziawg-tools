@@ -3,82 +3,77 @@ name: Linux
 on: [push]
 
 jobs:
-  Build-for-Ubuntu:
-    name: Build for Ubuntu
+  build:
+    name: Build for ${{ matrix.os }}:${{ matrix.version }} (${{ matrix.arch }})
     runs-on: ubuntu-latest
-    container:
-      image: ubuntu:22.04
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Build AmneziaWG tools
-      run: |
-        apt -y update &&
-        apt -y install build-essential &&
-        cd src &&
-        make &&
-        mkdir build &&
-        cp wg ./build/awg &&
-        cp wg-quick/linux.bash ./build/awg-quick
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ubuntu-22.04-amneziawg-tools
-        path: ./src/build
-
-  Build-for-Alpine:
-    name: Build for Alpine
-    runs-on: ubuntu-latest
-    container:
-      image: alpine:3.19
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - name: Build AmneziaWG tools
-      run: |
-        apk add linux-headers build-base &&
-        cd src &&
-        make &&
-        mkdir build &&
-        cp wg ./build/awg &&
-        cp wg-quick/linux.bash ./build/awg-quick
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: alpine-3.19-amneziawg-tools
-        path: ./src/build
-
-  GitHub-Release:
-    name: GitHub Release
-    needs: [Build-for-Ubuntu, Build-for-Alpine]
     strategy:
       matrix:
         include:
-          - os: "ubuntu"
-            release: "22.04"
-          - os: "alpine"
-            release: "3.19"
+          - os: ubuntu
+            version: "22.04"
+            arch: amd64
+          - os: ubuntu
+            version: "22.04"
+            arch: arm64
+          - os: alpine
+            version: "3.19"
+            arch: amd64
+          - os: alpine
+            version: "3.19"
+            arch: arm64
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Build in Docker container
+      run: |
+        docker run --rm --platform linux/${{ matrix.arch }} -v "${{ github.workspace }}":/workdir -w /workdir \
+          ${{ matrix.os }}:${{ matrix.version }} \
+          /bin/sh -c ' \
+            if [ "${{ matrix.os }}" = "ubuntu" ]; then \
+              apt-get -y update && apt-get -y install build-essential; \
+            else \
+              apk add linux-headers build-base; \
+            fi && \
+            cd src && \
+            make && \
+            mkdir build && \
+            cp wg ./build/awg && \
+            cp wg-quick/linux.bash ./build/awg-quick \
+          '
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os }}-${{ matrix.version }}-amneziawg-tools-${{ matrix.arch }}
+        path: ./src/build
+
+  release:
+    name: GitHub Release
+    needs: [build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Calculate checksums
-        run: for file in $(find ./${{ matrix.os }}-${{ matrix.release }}-amneziawg-tools/ -type f); do openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"; done
-        
       - name: Zip files
-        run: zip -r ${{ matrix.os }}-${{ matrix.release }}-amneziawg-tools.zip ${{ matrix.os }}-${{ matrix.release }}-amneziawg-tools
+        run: |
+          for dir in artifacts/*; do
+            if [ -d "$dir" ]; then
+              zip -j "${dir}.zip" "${dir}"/*
+            fi
+          done
 
       - name: Upload binaries to Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./${{ matrix.os }}-${{ matrix.release }}-amneziawg-tools.zip
+          file: artifacts/*.zip
           tag: ${{ github.ref }}
           release_name: ${{ github.ref_name }}
           overwrite: true
